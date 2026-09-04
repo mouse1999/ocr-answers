@@ -100,6 +100,7 @@ app.use(
       if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
         return callback(null, true);
       }
+      console.warn(`[CORS] Blocked request from unauthorized origin: ${origin}`);
       return callback(new Error(`Origin ${origin} not allowed by CORS`));
     },
     methods: ["GET", "POST", "OPTIONS"],
@@ -114,6 +115,7 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024 }, // 8MB cap keeps upload+inference fast
   fileFilter(_req, file, cb) {
     if (!file.mimetype.startsWith("image/")) {
+      console.warn(`[Multer] Rejected file upload with unsupported mimetype: ${file.mimetype}`);
       return cb(new Error("Only image files are allowed"));
     }
     cb(null, true);
@@ -142,7 +144,7 @@ const EXTRACTION_PROMPT = [
 /** Strips common markdown artifacts as a safety net, in case a model still
  * slips some in despite the system prompt. */
 function stripMarkdown(text) {
-  return text
+  const cleaned = text
     .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, "")) // fenced code
     .replace(/`([^`]*)`/g, "$1") // inline code
     .replace(/^\s{0,3}#{1,6}\s*/gm, "") // headings
@@ -154,11 +156,14 @@ function stripMarkdown(text) {
     .replace(/^\s{0,3}>\s?/gm, "") // blockquotes
     .replace(/\[(.*?)\]\((.*?)\)/g, "$1") // links -> text only
     .trim();
+
+  return cleaned;
 }
 
 async function extractQuestionsFromImage(buffer, mimeType) {
   if (!genAI) throw new Error("Gemini is not configured (missing GEMINI_API_KEY).");
 
+  console.log(`[Gemini] Starting extraction using model: ${GEMINI_MODEL}`);
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
   const result = await model.generateContent([
@@ -175,10 +180,13 @@ async function extractQuestionsFromImage(buffer, mimeType) {
   if (!text || !text.trim()) {
     throw new Error("Gemini returned no text for this image.");
   }
+  console.log("[Gemini] Successfully extracted text from image.");
   return text.trim();
 }
 
 async function answerQuestions(questionsText, systemPrompt) {
+  console.log(`[${ANSWER_PROVIDER}] Generating answer using model: ${ANSWER_MODEL}`);
+
   const completion = await answerClient.chat.completions.create({
     model: ANSWER_MODEL,
     temperature: 0.3,
@@ -189,7 +197,11 @@ async function answerQuestions(questionsText, systemPrompt) {
   });
 
   const raw = completion.choices?.[0]?.message?.content || "";
-  return stripMarkdown(raw);
+  console.log(`[${ANSWER_PROVIDER}] Received raw answer. Cleaning markdown formatting...`);
+
+  const cleaned = stripMarkdown(raw);
+  console.log(`[${ANSWER_PROVIDER}] Answer processing complete.`);
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,16 +217,24 @@ app.get("/health", (_req, res) => res.status(200).send("ok"));
 
 app.post("/api/solve", upload.single("image"), async (req, res) => {
   const startedAt = Date.now();
+  console.log(`\n[Incoming Request] POST /api/solve from IP: ${req.ip}`);
 
   try {
     if (!req.file) {
+      console.warn("[/api/solve] Bad Request: No image file attached.");
       return res.status(400).json({ error: "No image uploaded. Use field name 'image'." });
     }
+
+    console.log(`[File Received] Size: ${req.file.size} bytes, MimeType: ${req.file.mimetype}`);
 
     const customSystemPrompt =
       typeof req.body?.systemPrompt === "string" && req.body.systemPrompt.trim()
         ? req.body.systemPrompt.trim()
         : null;
+
+    if (customSystemPrompt) {
+      console.log("[/api/solve] Using custom system prompt provided in request body.");
+    }
 
     const t1 = Date.now();
     const questions = await extractQuestionsFromImage(req.file.buffer, req.file.mimetype);
@@ -224,13 +244,16 @@ app.post("/api/solve", upload.single("image"), async (req, res) => {
     const answer = await answerQuestions(questions, customSystemPrompt);
     const answerMs = Date.now() - t2;
 
+    const totalMs = Date.now() - startedAt;
+    console.log(`[/api/solve] Success | Extract: ${extractMs}ms | Answer: ${answerMs}ms | Total: ${totalMs}ms`);
+
     return res.json({
       questions,
       answer,
       timingMs: {
         extract: extractMs,
         answer: answerMs,
-        total: Date.now() - startedAt,
+        total: totalMs,
       },
       provider: {
         extraction: `gemini:${GEMINI_MODEL}`,
@@ -238,14 +261,20 @@ app.post("/api/solve", upload.single("image"), async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("[/api/solve] error:", err.message);
+    console.error("[/api/solve] Error encountered:", err.message);
+    if (err.stack) {
+      console.error(err.stack);
+    }
     return res.status(500).json({ error: err.message || "Something went wrong." });
   }
 });
 
 // Multer / generic error handler (keeps CORS headers on error responses too)
 app.use((err, _req, res, _next) => {
-  console.error("[error]", err.message);
+  console.error("[Global Error Handler]", err.message);
+  if (err.stack) {
+    console.error(err.stack);
+  }
   res.status(err.status || 500).json({ error: err.message || "Server error" });
 });
 
