@@ -197,6 +197,7 @@ async function answerQuestions(questionsText, systemPrompt) {
   const completion = await answerClient.chat.completions.create({
     model: ANSWER_MODEL,
     temperature: 0.3,
+    max_tokens: 1000,
     messages: [
       { role: "system", content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
       { role: "user", content: questionsText },
