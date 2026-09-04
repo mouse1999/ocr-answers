@@ -29,7 +29,7 @@ const OpenAI = require("openai");
 const PORT = process.env.PORT || 8080;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 // ANSWER_PROVIDER = "openai" | "grok"
 const ANSWER_PROVIDER = (process.env.ANSWER_PROVIDER || "openai").toLowerCase();
