@@ -4,7 +4,7 @@
  * Flow:
  *   1. Client uploads an image (multipart/form-data, field name "image").
  *   2. Gemini (vision) reads the image and extracts the raw question text.
- *   3. The extracted text is handed to a second model (OpenAI or Grok/x.ai,
+ *   3. The extracted text is handed to a second model (OpenAI or Grok via OpenRouter,
  *      both use the OpenAI-compatible chat API) with a system prompt that
  *      forces a clean, plain-text, copy-paste-ready answer.
  *   4. The server strips any leftover markdown as a safety net and returns
@@ -34,10 +34,10 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 // ANSWER_PROVIDER = "openai" | "grok"
 const ANSWER_PROVIDER = (process.env.ANSWER_PROVIDER || "openai").toLowerCase();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const GROK_API_KEY = process.env.GROK_API_KEY; // x.ai key
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; // OpenRouter key for Grok
 const ANSWER_MODEL =
   process.env.ANSWER_MODEL ||
-  (ANSWER_PROVIDER === "grok" ? "grok-2-latest" : "gpt-4o-mini");
+  (ANSWER_PROVIDER === "grok" ? "x-ai/grok-2-1212" : "gpt-4o-mini");
 
 // Comma separated list of allowed frontend origins, e.g.
 // "https://my-app.vercel.app,http://localhost:5500"
@@ -68,8 +68,8 @@ if (!GEMINI_API_KEY) {
 if (ANSWER_PROVIDER === "openai" && !OPENAI_API_KEY) {
   console.warn("[warn] OPENAI_API_KEY is not set — /api/solve will fail until it is.");
 }
-if (ANSWER_PROVIDER === "grok" && !GROK_API_KEY) {
-  console.warn("[warn] GROK_API_KEY is not set — /api/solve will fail until it is.");
+if (ANSWER_PROVIDER === "grok" && !OPENROUTER_API_KEY) {
+  console.warn("[warn] OPENROUTER_API_KEY is not set — /api/solve will fail until it is.");
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,14 @@ const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
 const answerClient =
   ANSWER_PROVIDER === "grok"
-    ? new OpenAI({ apiKey: GROK_API_KEY, baseURL: "https://api.x.ai/v1" })
+    ? new OpenAI({
+        apiKey: OPENROUTER_API_KEY,
+        baseURL: "https://openrouter.ai/api/v1",
+        defaultHeaders: {
+          "HTTP-Referer": process.env.SITE_URL || "http://localhost:8080",
+          "X-Title": process.env.SITE_NAME || "Image Question Solver",
+        },
+      })
     : new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // ---------------------------------------------------------------------------
@@ -127,19 +134,19 @@ const upload = multer({
 // ---------------------------------------------------------------------------
 
 const EXTRACTION_PROMPT = [
-                            "You are an expert OCR and text extraction assistant.",
-                            "Your sole task is to extract the exact text of the question and its associated code snippet from the provided image.",
-                            "STRICT CONSTRAINTS:",
-                            "- DO NOT answer, solve, or attempt to resolve the question.",
-                            "- DO NOT add any commentary, explanations, introductions, or conversational filler.",
-                            "- DO NOT summarize or rephrase; transcribe the text verbatim.",
-                            "EXTRACTION RULES:",
-                            "1. Question: Transcribe the full problem statement, including all text, prompt details, or options directly attached to the question.",
-                            "2. Code Snippet: Transcribe any code block, pseudo-code, output snippet, or syntax attached to the question. Retain exact indentation, casing, and line breaks.",
-                            "OUTPUT FORMAT:",
-                            "Output ONLY the extracted content using the following markdown structure and nothing else:",
-                            "### Question\n[Insert verbatim question text here]\n\n### Code Snippet\n```[language]\n[Insert verbatim code snippet here]\n```\n(If no code snippet is present, write \"None\" under the Code Snippet heading.)"
-                          ].join(" ");
+  "You are an expert OCR and text extraction assistant.",
+  "Your sole task is to extract the exact text of the question and its associated code snippet from the provided image.",
+  "STRICT CONSTRAINTS:",
+  "- DO NOT answer, solve, or attempt to resolve the question.",
+  "- DO NOT add any commentary, explanations, introductions, or conversational filler.",
+  "- DO NOT summarize or rephrase; transcribe the text verbatim.",
+  "EXTRACTION RULES:",
+  "1. Question: Transcribe the full problem statement, including all text, prompt details, or options directly attached to the question.",
+  "2. Code Snippet: Transcribe any code block, pseudo-code, output snippet, or syntax attached to the question. Retain exact indentation, casing, and line breaks.",
+  "OUTPUT FORMAT:",
+  "Output ONLY the extracted content using the following markdown structure and nothing else:",
+  "### Question\n[Insert verbatim question text here]\n\n### Code Snippet\n```[language]\n[Insert verbatim code snippet here]\n```\n(If no code snippet is present, write \"None\" under the Code Snippet heading.)",
+].join(" ");
 
 /** Strips common markdown artifacts as a safety net, in case a model still
  * slips some in despite the system prompt. */
