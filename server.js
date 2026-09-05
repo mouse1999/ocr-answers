@@ -1,17 +1,5 @@
 /**
- * Image -> Questions -> Answers backend
- * -------------------------------------
- * Flow:
- *   1. Client uploads an image (multipart/form-data, field name "image").
- *   2. Gemini (vision) reads the image and extracts the raw question text.
- *   3. The extracted text is handed to a second model (OpenAI or Grok via OpenRouter,
- *      both use the OpenAI-compatible chat API) with a system prompt that
- *      forces a clean, plain-text, copy-paste-ready answer.
- *   4. The server strips any leftover markdown as a safety net and returns
- *      plain text (plus the extracted questions, and timing info).
- *
- * Kept deliberately small and dependency-light so cold starts on Render
- * stay fast: no image resizing library, no queues, no extra middleware.
+ * Image / Text -> Questions -> Answers backend
  */
 
 require("dotenv").config();
@@ -39,8 +27,6 @@ const ANSWER_MODEL =
   process.env.ANSWER_MODEL ||
   (ANSWER_PROVIDER === "grok" ? "x-ai/grok-2-1212" : "gpt-4o-mini");
 
-// Comma separated list of allowed frontend origins, e.g.
-// "https://my-app.vercel.app,http://localhost:5500"
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
 const ALLOWED_ORIGINS = FRONTEND_URL.split(",").map((s) => s.trim()).filter(Boolean);
 
@@ -63,16 +49,15 @@ const DEFAULT_SYSTEM_PROMPT =
   ].join(" ");
 
 if (!GEMINI_API_KEY) {
-  console.warn("[warn] GEMINI_API_KEY is not set — /api/solve will fail until it is.");
+  console.warn("[warn] GEMINI_API_KEY is not set — image extraction will fail.");
 }
 if (ANSWER_PROVIDER === "openai" && !OPENAI_API_KEY) {
-  console.warn("[warn] OPENAI_API_KEY is not set — /api/solve will fail until it is.");
+  console.warn("[warn] OPENAI_API_KEY is not set.");
 }
 if (ANSWER_PROVIDER === "grok" && !OPENROUTER_API_KEY) {
-  console.warn("[warn] OPENROUTER_API_KEY is not set — /api/solve will fail until it is.");
+  console.warn("[warn] OPENROUTER_API_KEY is not set.");
 }
 
-// Helper to ensure OpenRouter HTTP-Referer is always a valid absolute URL
 function getValidSiteUrl() {
   const envUrl = process.env.SITE_URL || process.env.FRONTEND_URL;
   if (!envUrl) return "http://localhost:8080";
@@ -106,15 +91,11 @@ const answerClient =
 // ---------------------------------------------------------------------------
 
 const app = express();
-
-// Trust Render's proxy (needed for correct protocol/IP handling)
 app.set("trust proxy", 1);
 
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow server-to-server / curl calls with no Origin header,
-      // and allow everything if no allowlist was configured (dev mode).
       if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
         return callback(null, true);
       }
@@ -130,10 +111,9 @@ app.use(express.json({ limit: "1mb" }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB cap keeps upload+inference fast
+  limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter(_req, file, cb) {
     if (!file.mimetype.startsWith("image/")) {
-      console.warn(`[Multer] Rejected file upload with unsupported mimetype: ${file.mimetype}`);
       return cb(new Error("Only image files are allowed"));
     }
     cb(null, true);
@@ -159,52 +139,40 @@ const EXTRACTION_PROMPT = [
   "### Question\n[Insert verbatim question text here]\n\n### Code Snippet\n```[language]\n[Insert verbatim code snippet here]\n```\n(If no code snippet is present, write \"None\" under the Code Snippet heading.)",
 ].join(" ");
 
-/** Strips common markdown artifacts as a safety net, in case a model still
- * slips some in despite the system prompt. */
 function stripMarkdown(text) {
-  const cleaned = text
-    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, "")) // fenced code
-    .replace(/`([^`]*)`/g, "$1") // inline code
-    .replace(/^\s{0,3}#{1,6}\s*/gm, "") // headings
-    .replace(/\*\*(.*?)\*\*/g, "$1") // bold
-    .replace(/__(.*?)__/g, "$1") // bold (underscore)
-    .replace(/\*(.*?)\*/g, "$1") // italic
-    .replace(/_(.*?)_/g, "$1") // italic (underscore)
-    .replace(/^\s{0,3}[-*+]\s+/gm, "") // bullet list markers
-    .replace(/^\s{0,3}>\s?/gm, "") // blockquotes
-    .replace(/\[(.*?)\]\((.*?)\)/g, "$1") // links -> text only
+  return text
+    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, ""))
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/_(.*?)_/g, "$1")
+    .replace(/^\s{0,3}[-*+]\s+/gm, "")
+    .replace(/^\s{0,3}>\s?/gm, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
     .trim();
-
-  return cleaned;
 }
 
 async function extractQuestionsFromImage(buffer, mimeType) {
   if (!genAI) throw new Error("Gemini is not configured (missing GEMINI_API_KEY).");
-
   console.log(`[Gemini] Starting extraction using model: ${GEMINI_MODEL}`);
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
   const result = await model.generateContent([
     { text: EXTRACTION_PROMPT },
-    {
-      inlineData: {
-        data: buffer.toString("base64"),
-        mimeType,
-      },
-    },
+    { inlineData: { data: buffer.toString("base64"), mimeType } },
   ]);
 
   const text = result.response.text();
   if (!text || !text.trim()) {
     throw new Error("Gemini returned no text for this image.");
   }
-  console.log("[Gemini] Successfully extracted text from image.");
   return text.trim();
 }
 
 async function answerQuestions(questionsText, systemPrompt) {
   console.log(`[${ANSWER_PROVIDER}] Generating answer using model: ${ANSWER_MODEL}`);
-
   const completion = await answerClient.chat.completions.create({
     model: ANSWER_MODEL,
     temperature: 0.3,
@@ -216,44 +184,24 @@ async function answerQuestions(questionsText, systemPrompt) {
   });
 
   const raw = completion.choices?.[0]?.message?.content || "";
-  console.log(`[${ANSWER_PROVIDER}] Received raw answer. Cleaning markdown formatting...`);
-
-  const cleaned = stripMarkdown(raw);
-  console.log(`[${ANSWER_PROVIDER}] Answer processing complete.`);
-  return cleaned;
+  return stripMarkdown(raw);
 }
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
-app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "image-question-solver-backend" });
-});
-
-// Cheap health check for Render
+app.get("/", (_req, res) => res.json({ ok: true, service: "image-question-solver-backend" }));
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
+// Endpoint for image processing
 app.post("/api/solve", upload.single("image"), async (req, res) => {
   const startedAt = Date.now();
-  console.log(`\n[Incoming Request] POST /api/solve from IP: ${req.ip}`);
-
   try {
-    if (!req.file) {
-      console.warn("[/api/solve] Bad Request: No image file attached.");
-      return res.status(400).json({ error: "No image uploaded. Use field name 'image'." });
-    }
+    if (!req.file) return res.status(400).json({ error: "No image uploaded. Use field name 'image'." });
 
-    console.log(`[File Received] Size: ${req.file.size} bytes, MimeType: ${req.file.mimetype}`);
-
-    const customSystemPrompt =
-      typeof req.body?.systemPrompt === "string" && req.body.systemPrompt.trim()
-        ? req.body.systemPrompt.trim()
-        : null;
-
-    if (customSystemPrompt) {
-      console.log("[/api/solve] Using custom system prompt provided in request body.");
-    }
+    const customSystemPrompt = typeof req.body?.systemPrompt === "string" && req.body.systemPrompt.trim()
+      ? req.body.systemPrompt.trim() : null;
 
     const t1 = Date.now();
     const questions = await extractQuestionsFromImage(req.file.buffer, req.file.mimetype);
@@ -263,42 +211,47 @@ app.post("/api/solve", upload.single("image"), async (req, res) => {
     const answer = await answerQuestions(questions, customSystemPrompt);
     const answerMs = Date.now() - t2;
 
-    const totalMs = Date.now() - startedAt;
-    console.log(`[/api/solve] Success | Extract: ${extractMs}ms | Answer: ${answerMs}ms | Total: ${totalMs}ms`);
-
     return res.json({
       questions,
       answer,
-      timingMs: {
-        extract: extractMs,
-        answer: answerMs,
-        total: totalMs,
-      },
-      provider: {
-        extraction: `gemini:${GEMINI_MODEL}`,
-        answering: `${ANSWER_PROVIDER}:${ANSWER_MODEL}`,
-      },
+      timingMs: { extract: extractMs, answer: answerMs, total: Date.now() - startedAt },
+      provider: { extraction: `gemini:${GEMINI_MODEL}`, answering: `${ANSWER_PROVIDER}:${ANSWER_MODEL}` },
     });
   } catch (err) {
-    console.error("[/api/solve] Error encountered:", err.message);
-    if (err.stack) {
-      console.error(err.stack);
-    }
+    console.error("[/api/solve] Error:", err.message);
     return res.status(500).json({ error: err.message || "Something went wrong." });
   }
 });
 
-// Multer / generic error handler (keeps CORS headers on error responses too)
-app.use((err, _req, res, _next) => {
-  console.error("[Global Error Handler]", err.message);
-  if (err.stack) {
-    console.error(err.stack);
+// Endpoint for text questions directly
+app.post("/api/solve-text", async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const { questionsText, systemPrompt } = req.body || {};
+    if (!questionsText || !questionsText.trim()) {
+      return res.status(400).json({ error: "No question text provided." });
+    }
+
+    const t2 = Date.now();
+    const answer = await answerQuestions(questionsText, systemPrompt);
+    const answerMs = Date.now() - t2;
+
+    return res.json({
+      questions: questionsText,
+      answer,
+      timingMs: { extract: 0, answer: answerMs, total: Date.now() - startedAt },
+      provider: { extraction: "text-input", answering: `${ANSWER_PROVIDER}:${ANSWER_MODEL}` },
+    });
+  } catch (err) {
+    console.error("[/api/solve-text] Error:", err.message);
+    return res.status(500).json({ error: err.message || "Something went wrong." });
   }
+});
+
+app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.message || "Server error" });
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
-  console.log(`Answer provider: ${ANSWER_PROVIDER} (${ANSWER_MODEL})`);
-  console.log(`Extraction model: gemini (${GEMINI_MODEL})`);
 });
