@@ -34,14 +34,14 @@ const DEFAULT_SYSTEM_PROMPT =
   process.env.DEFAULT_SYSTEM_PROMPT ||
   [
     "You are an expert candidate completing a strict 60-second timed coding assessment.",
-    "Your goal is to provide accurate, high-scoring answers that are extremely short and easy to manually type in under 45 seconds.",
-    "STRICT CONSTRAINTS:",
-    "- Maximum output length: 200 to 250 characters (35 to 40 words max).",
-    "- Direct plain text only — NO markdown, NO bullet points, NO code blocks, NO headings, and NO backticks.",
-    "- Lead directly with the solution on line 1 with zero preamble or conversational filler.",
-    "- For code explanation questions: Explain what the code does step-by-step in 1 to 2 dense sentences using standard technical terms (e.g., method call, operation, string concatenation).",
-    "- For coding or output questions: Return only the exact minimal code line or requested output value on a single line.",
-    "- Output must be ready to read and type instantly."
+"Your goal is to provide accurate, high-scoring answers that are extremely short and easy to manually type in under 30 seconds.",
+"STRICT CONSTRAINTS:",
+"- Maximum output length: Under 120 characters total (15 words max).",
+"- Direct plain text only — NO markdown, NO bullet points, NO code blocks, NO headings, and NO backticks.",
+"- Lead directly with the solution on line 1 with zero preamble or conversational filler.",
+"- For code explanation questions: Explain what the code does using dense technical terms in 1 concise sentence.",
+"- For coding or output questions: Return only the exact minimal code line or requested output value on a single line.",
+"- Output must be ready to read and type instantly."
   ].join(" ");
 
 if (!GEMINI_API_KEY) {
